@@ -117,7 +117,7 @@ def main():
     review_comments = []
 
     for file in files:
-        if not file["filename"].endswith(".cs"):
+        if not file["filename"].endswith(".py"):
             continue
         patch = file.get("patch")
         if not patch:
@@ -143,7 +143,7 @@ def main():
         # Post a simple PR comment instead of an inline review
         url = f"{GITHUB_API}/issues/{PR_NUMBER}/comments"
         headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-        data = {"body": "✅ No C# code issues found in this PR."}
+        data = {"body": "✅ No Python code issues found in this PR."}
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
 
