@@ -2,7 +2,7 @@ import os
 import re
 import json
 import requests
-import openai
+from openai import OpenAI
 
 # --- Config ---
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
