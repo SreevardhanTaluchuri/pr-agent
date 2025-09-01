@@ -136,9 +136,8 @@ def main():
             print(s)
             review_comments.append({
                 "path": file["filename"],
-                "position": s.get("line"),  # position is relative to diff, not absolute line
-                "body": s.get("comment"),
-                "side": "RIGHT"
+                "position": s.get("line"),  # must be a valid diff position
+                "body": decorate_comment(s.get("severity", "Suggestion"), s.get("comment")),
             })
             print(review_comments)
 
