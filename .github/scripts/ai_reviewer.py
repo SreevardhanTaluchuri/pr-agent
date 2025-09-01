@@ -80,14 +80,17 @@ def analyze_code_with_ai(filename, patch):
     Diff:
     {patch}
     """
-
-    resp = openai.ChatCompletion.create(
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    
+    resp = client.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
         max_tokens=600,
         temperature=0,
     )
-    text = resp.choices[0].message["content"].strip()
+    
+    text = resp.choices[0].message.content.strip()
+    
     try:
         return json.loads(text)
     except Exception:
