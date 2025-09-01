@@ -133,12 +133,14 @@ def main():
 
         for s in suggestions:
             # GitHub expects "side": "RIGHT" for new code
+            print(s)
             review_comments.append({
                 "path": file["filename"],
                 "position": s.get("line"),  # position is relative to diff, not absolute line
                 "body": s.get("comment"),
                 "side": "RIGHT"
             })
+            print(review_comments)
 
     if review_comments:
         post_review(review_comments)
