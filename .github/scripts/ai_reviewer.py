@@ -59,7 +59,7 @@ def analyze_code_with_ai(filename, patch):
     openai.api_key = OPENAI_API_KEY
 
     prompt = f"""
-    You are a python code reviewer.
+    You are a PYTHON code reviewer.
      Review the following Pull Request diff for `{filename}`
     - Point out syntax errors if any
     - Suggest cleaner or more efficient alternatives
@@ -140,12 +140,12 @@ def main():
     if review_comments:
         post_review(review_comments)
     else:
-        post_review([{
-            "path": files[0]["filename"] if files else "N/A",
-            "line": 1,
-            "side": "RIGHT",
-            "body": "✅ No issues found in this PR.",
-        }])
+        # Post a simple PR comment instead of an inline review
+        url = f"{GITHUB_API}/issues/{PR_NUMBER}/comments"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
+        data = {"body": "✅ No C# code issues found in this PR."}
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
 
 if __name__ == "__main__":
     main()
