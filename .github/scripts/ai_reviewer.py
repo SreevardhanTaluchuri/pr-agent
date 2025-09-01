@@ -137,6 +137,7 @@ def main():
         for s in suggestions:
             diff_line = s.get("diff_line")
             abs_line = diff_map.get(diff_line)
+            print(s+" "+diff_line+" "+abs_line)
             if abs_line:
                 review_comments.append({
                     "path": file["filename"],
