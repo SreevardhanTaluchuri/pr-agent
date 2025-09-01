@@ -8,9 +8,10 @@ from openai import OpenAI
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 REPO = os.environ["GITHUB_REPO"]
 PR_NUMBER = os.environ["PR_NUMBER"]
-OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
+HF_TOKEN = os.environ["HF_TOKEN"]
 
 GITHUB_API = f"https://api.github.com/repos/{REPO}"
+HF_API_URL = "https://api-inference.huggingface.co/models/codellama/CodeLlama-7b-Instruct-hf"
 
 # --- Helpers ---
 def get_pr_files():
@@ -22,8 +23,8 @@ def get_pr_files():
 
 def parse_patch_to_line_map(patch):
     """
-    Parses a unified diff patch and returns mapping:
-    diff_line_number -> absolute_file_line_number
+    Uses Hugging Face Inference API (CodeLlama).
+    Returns list of {"diff_line", "severity", "comment"}
     """
     line_map = {}
     if not patch:
@@ -80,20 +81,27 @@ def analyze_code_with_ai(filename, patch):
     Diff:
     {patch}
     """
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    headers = {
+        "Authorization": f"Bearer {HF_TOKEN}",
+        "Content-Type": "application/json",
+    }
     
-    resp = client.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=600,
-        temperature=0,
+    response = requests.post(
+        HF_API_URL,
+        headers=headers,
+        json={"inputs": prompt, "parameters": {"max_new_tokens": 500}},
     )
     
-    text = resp.choices[0].message.content.strip()
+    if response.status_code != 200:
+        print("Hugging Face API error:", response.text)
+        return []
     
     try:
-        return json.loads(text)
-    except Exception:
+        # HF returns [{ "generated_text": "..."}]
+        generated = response.json()[0]["generated_text"].strip()
+        return json.loads(generated)
+    except Exception as e:
+        print("Parse error:", e, response.text)
         return []
 
 def decorate_comment(severity, comment):
