@@ -73,8 +73,8 @@ def analyze_code_with_ai(filename, patch):
 
     Return STRICT JSON array only, like:
     [
-      {{"diff_line": 42, "severity": "Critical", "comment": "Null reference risk here."}},
-      {{"diff_line": 55, "severity": "Suggestion", "comment": "Consider using 'using' statement for disposal."}}
+      {{"line": 42, "severity": "Critical", "comment": "Null reference risk here."}},
+      {{"line": 42, "severity": "Suggestion", "comment": "Consider using 'using' statement for disposal."}}
     ]
 
     Diff:
@@ -93,8 +93,6 @@ def analyze_code_with_ai(filename, patch):
     )
     
     text = resp.choices[0].message.content.strip()
-    
-    print(text)
     
     try:
         return json.loads(text)
@@ -131,20 +129,17 @@ def main():
         if not patch:
             continue
 
-        diff_map = parse_patch_to_line_map(patch)
         suggestions = analyze_code_with_ai(file["filename"], patch)
 
         for s in suggestions:
-            diff_line = s.get("diff_line")
-            abs_line = diff_map.get(diff_line)
-            print(s+" "+diff_line+" "+abs_line)
-            if abs_line:
-                review_comments.append({
-                    "path": file["filename"],
-                    "line": abs_line,
-                    "side": "RIGHT",
-                    "body": decorate_comment(s.get("severity", "Suggestion"), s.get("comment")),
-                })
+            # GitHub expects "side": "RIGHT" for new code
+            print(s)
+            review_comments.append({
+                "path": file["filename"],
+                "position": s.get("line"),  # must be a valid diff position
+                "body": decorate_comment(s.get("severity", "Suggestion"), s.get("comment")),
+            })
+            print(review_comments)
 
     if review_comments:
         post_review(review_comments)
