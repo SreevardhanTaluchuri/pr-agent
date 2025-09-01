@@ -94,8 +94,6 @@ def analyze_code_with_ai(filename, patch):
     
     text = resp.choices[0].message.content.strip()
     
-    print(text)
-    
     try:
         return json.loads(text)
     except Exception:
@@ -137,8 +135,6 @@ def main():
         for s in suggestions:
             diff_line = s.get("diff_line")
             abs_line = diff_map.get(diff_line)
-            print(abs_line)
-            print(diff_line)
             if abs_line:
                 review_comments.append({
                     "path": file["filename"],
@@ -146,6 +142,7 @@ def main():
                     "side": "RIGHT",
                     "body": decorate_comment(s.get("severity", "Suggestion"), s.get("comment")),
                 })
+                print(review_comments)
 
     if review_comments:
         post_review(review_comments)
