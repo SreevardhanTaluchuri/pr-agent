@@ -59,8 +59,11 @@ def analyze_code_with_ai(filename, patch):
     openai.api_key = OPENAI_API_KEY
 
     prompt = f"""
-    You are a C# code reviewer.
-    Review the following diff for `{filename}`.
+    You are a python code reviewer.
+     Review the following Pull Request diff for `{filename}`
+    - Point out syntax errors if any
+    - Suggest cleaner or more efficient alternatives
+    - Give feedback in concise bullet points
 
     For each finding:
     - Use `severity` field with one of: Critical, Warning, Suggestion
