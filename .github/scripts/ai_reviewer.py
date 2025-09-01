@@ -2,12 +2,13 @@ import os
 import re
 import json
 import requests
+from openai import OpenAI
 
 # --- Config ---
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 REPO = os.environ["GITHUB_REPO"]
 PR_NUMBER = os.environ["PR_NUMBER"]
-HF_TOKEN = os.environ["HF_TOKEN"]
+OPENAI_API_KEY = os.environ["HF_TOKEN"]
 
 GITHUB_API = f"https://api.github.com/repos/{REPO}"
 HF_API_URL = "https://api-inference.huggingface.co/models/codellama/CodeLlama-7b-Instruct-hf"
@@ -56,6 +57,7 @@ def analyze_code_with_ai(filename, patch):
       {"diff_line": <diff_line>, "severity": "Critical|Warning|Suggestion", "comment": "<text>"}
     ]
     """
+    openai.api_key = OPENAI_API_KEY
 
     prompt = f"""
     You are a PYTHON code reviewer.
@@ -79,27 +81,25 @@ def analyze_code_with_ai(filename, patch):
     Diff:
     {patch}
     """
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    
-    response = requests.post(
-        HF_API_URL,
-        headers=headers,
-        json={"inputs": prompt, "parameters": {"max_new_tokens": 500}},
+    client = OpenAI(
+        base_url="https://router.huggingface.co/v1",
+        api_key=os.environ["HF_TOKEN"],
     )
     
-    if response.status_code != 200:
-        print("Hugging Face API error:", response.text)
-        return []
+    resp = client.chat.completions.create(
+        model="openai/gpt-oss-120b:together",
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=600,
+        temperature=0,
+    )
+    
+    text = resp.choices[0].message.content.strip()
+    
+    print(text)
     
     try:
-        # HF returns [{ "generated_text": "..."}]
-        generated = response.json()[0]["generated_text"].strip()
-        return json.loads(generated)
-    except Exception as e:
-        print("Parse error:", e, response.text)
+        return json.loads(text)
+    except Exception:
         return []
 
 def decorate_comment(severity, comment):
