@@ -56,7 +56,6 @@ def analyze_code_with_ai(filename, patch):
       {"diff_line": <diff_line>, "severity": "Critical|Warning|Suggestion", "comment": "<text>"}
     ]
     """
-    openai.api_key = OPENAI_API_KEY
 
     prompt = f"""
     You are a PYTHON code reviewer.
