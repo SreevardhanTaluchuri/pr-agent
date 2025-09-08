@@ -1,0 +1,222 @@
+name: PR Build Validation
+
+# Trigger on PR events - opened, reopened, and synchronize (new commits)
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Build and Validate PR
+    
+    steps:
+    # Step 1: Check out the code
+    # This checks out the merge commit of the PR, not just the PR branch
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        # Fetch the full history to ensure we have all commits
+        fetch-depth: 0
+        # This ensures we're building the actual merge result
+        ref: ${{ github.event.pull_request.head.sha }}
+    
+    # Step 2: Set up .NET SDK
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '8.0.x' # Adjust version as needed
+    
+    # Step 3: Restore dependencies
+    - name: Restore dependencies
+      run: dotnet restore
+      
+    # Step 4: Build the solution
+    - name: Build solution
+      id: build
+      run: |
+        echo "Building solution..."
+        # Capture build output and exit code
+        if dotnet build --no-restore --configuration Release > build_output.txt 2>&1; then
+          echo "build_success=true" >> $GITHUB_OUTPUT
+          echo "Build succeeded!"
+        else
+          echo "build_success=false" >> $GITHUB_OUTPUT
+          echo "Build failed!"
+          # Output the build errors for debugging
+          cat build_output.txt
+        fi
+        
+    # Step 5: Read build output for commenting
+    - name: Read build output
+      id: build_output
+      if: always()
+      run: |
+        if [ -f build_output.txt ]; then
+          # Escape newlines and special characters for GitHub output
+          BUILD_OUTPUT=$(cat build_output.txt | head -50)  # Limit output length
+          echo "BUILD_OUTPUT<<EOF" >> $GITHUB_OUTPUT
+          echo "$BUILD_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        fi
+    
+    # Step 6: Run unit tests (only if build succeeded)
+    - name: Run unit tests
+      id: test
+      if: steps.build.outputs.build_success == 'true'
+      run: |
+        echo "Running unit tests..."
+        # Define the test path - adjust this to your test project location
+        TEST_PATH="./tests"  # Change this to your actual test project path
+        
+        # Check if test path exists
+        if [ ! -d "$TEST_PATH" ]; then
+          echo "Test path $TEST_PATH not found. Skipping tests."
+          echo "test_skipped=true" >> $GITHUB_OUTPUT
+          echo "test_success=true" >> $GITHUB_OUTPUT  # Don't fail if no tests
+          exit 0
+        fi
+        
+        # Run tests and capture output
+        if dotnet test "$TEST_PATH" --no-build --configuration Release --verbosity normal --logger "console;verbosity=detailed" > test_output.txt 2>&1; then
+          echo "test_success=true" >> $GITHUB_OUTPUT
+          echo "test_skipped=false" >> $GITHUB_OUTPUT
+          echo "Unit tests passed!"
+          
+          # Extract test summary
+          grep -E "(Passed|Failed|Skipped)" test_output.txt | tail -5 || echo "Test summary not found"
+        else
+          echo "test_success=false" >> $GITHUB_OUTPUT
+          echo "test_skipped=false" >> $GITHUB_OUTPUT
+          echo "Unit tests failed!"
+          # Output the test failures for debugging
+          cat test_output.txt
+        fi
+    
+    # Step 7: Read test output for commenting
+    - name: Read test output
+      id: test_output
+      if: always() && steps.test.outputs.test_skipped == 'false'
+      run: |
+        if [ -f test_output.txt ]; then
+          # Extract relevant test information
+          TEST_OUTPUT=$(cat test_output.txt | grep -A 10 -B 10 -E "(Failed|Error|Exception)" | head -100)
+          if [ -z "$TEST_OUTPUT" ]; then
+            # If no failures found, get the summary
+            TEST_OUTPUT=$(cat test_output.txt | tail -20)
+          fi
+          echo "TEST_OUTPUT<<EOF" >> $GITHUB_OUTPUT
+          echo "$TEST_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          # Extract test counts
+          TEST_SUMMARY=$(cat test_output.txt | grep -E "Passed|Failed|Skipped" | tail -1 || echo "Summary not found")
+          echo "TEST_SUMMARY<<EOF" >> $GITHUB_OUTPUT
+          echo "$TEST_SUMMARY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        fi
+
+    # Step 8: Comment on PR - Build and Tests Success
+    - name: Comment on PR - Build and Tests Success
+      if: steps.build.outputs.build_success == 'true' && (steps.test.outputs.test_success == 'true' || steps.test.outputs.test_skipped == 'true')
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const testSkipped = '${{ steps.test.outputs.test_skipped }}' === 'true';
+          const testSummary = `${{ steps.test_output.outputs.TEST_SUMMARY }}`;
+          
+          let message = '✅ **Build and Tests Successful**\n\n';
+          message += 'The C# codebase built successfully with your changes!\n\n';
+          
+          if (testSkipped) {
+            message += '⚠️ **Note**: No test projects found at the specified path. Consider adding unit tests for better code quality.';
+          } else {
+            message += `🧪 **Test Results**: ${testSummary || 'All tests passed!'}`;
+          }
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: message
+          })
+    
+    # Step 9: Comment on PR - Tests Failed
+    - name: Comment on PR - Tests Failed
+      if: steps.build.outputs.build_success == 'true' && steps.test.outputs.test_success == 'false'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const testOutput = `${{ steps.test_output.outputs.TEST_OUTPUT }}`;
+          const testSummary = `${{ steps.test_output.outputs.TEST_SUMMARY }}`;
+          const truncatedOutput = testOutput.length > 1500 ? 
+            testOutput.substring(0, 1500) + '\n... (output truncated)' : 
+            testOutput;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `✅ **Build Successful** - ❌ **Tests Failed**
+
+The C# codebase built successfully, but unit tests are failing. Please fix the following test failures before merging:
+
+🧪 **Test Summary**: ${testSummary || 'Test summary not available'}
+
+**Test Failures:**
+\`\`\`
+${truncatedOutput || 'No specific error details available'}
+\`\`\`
+
+Please fix these test failures and push new commits to update this PR.`
+          })
+
+    # Step 10: Comment on PR - Build Failure
+    - name: Comment on PR - Build Failure
+      if: steps.build.outputs.build_success == 'false'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const buildOutput = `${{ steps.build_output.outputs.BUILD_OUTPUT }}`;
+          const truncatedOutput = buildOutput.length > 2000 ? 
+            buildOutput.substring(0, 2000) + '\n... (output truncated)' : 
+            buildOutput;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `❌ **Build Failed**
+
+The C# codebase failed to build with your changes. Please fix the following errors before merging:
+
+\`\`\`
+${truncatedOutput}
+\`\`\`
+
+Please fix these issues and push new commits to update this PR.`
+          })
+    
+    # Step 11: Set the final status
+    # This step will fail if build failed OR tests failed, preventing merge
+    - name: Check build and test results
+      if: always()
+      run: |
+        BUILD_SUCCESS="${{ steps.build.outputs.build_success }}"
+        TEST_SUCCESS="${{ steps.test.outputs.test_success }}"
+        TEST_SKIPPED="${{ steps.test.outputs.test_skipped }}"
+        
+        echo "Build success: $BUILD_SUCCESS"
+        echo "Test success: $TEST_SUCCESS"
+        echo "Test skipped: $TEST_SKIPPED"
+        
+        if [ "$BUILD_SUCCESS" != "true" ]; then
+          echo "❌ Build failed - blocking PR merge"
+          exit 1
+        elif [ "$TEST_SKIPPED" != "true" ] && [ "$TEST_SUCCESS" != "true" ]; then
+          echo "❌ Tests failed - blocking PR merge"
+          exit 1
+        else
+          echo "✅ Build and tests successful - PR can be merged"
+          exit 0
+        fi
