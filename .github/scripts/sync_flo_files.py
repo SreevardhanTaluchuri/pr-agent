@@ -207,7 +207,7 @@ class FLOFileSyncManager:
         self.run_command(["git", "checkout", "-b", sync_branch])
         
         # The target file name in this branch (same pattern: flo_{branch_name})
-        target_flo_file = f"flo_{target_branch}"
+        target_flo_file = f"flo_{target_branch}.yml"
         
         # Write the content to the target flo file
         print(f"📝 Writing content to {target_flo_file}...")
