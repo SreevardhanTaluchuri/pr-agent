@@ -5,6 +5,36 @@ FLO File Sync Script for UAT Branches
 This script detects changes to flo_{branch_name} files in pull requests
 and replicates those changes to other UAT branches automatically.
 
+==============================================================================
+IMPORTANT: THIS SCRIPT CREATES PULL REQUESTS, NOT DIRECT COMMITS!
+==============================================================================
+
+Workflow Flow:
+
+    Original PR                  This Script Creates
+    ===========                  ===================
+    
+    feature-123                  sync-branch-na-456
+         |                            |
+         v                            v
+    [uat_emea]  ─────────────>  [uat_na]      (PR #456)
+    (flo_uat_emea changed)      (via PR, not direct commit)
+         |
+         |                       sync-branch-apac-789
+         |                            |
+         |                            v
+         └─────────────────────>  [uat_apac]   (PR #789)
+         |                       (via PR, not direct commit)
+         |
+         |                       sync-branch-latam-012
+         |                            |
+         └─────────────────────>  [uat_latam]  (PR #012)
+                                 (via PR, not direct commit)
+
+Result: Original PR gets a comment with links to PR #456, #789, #012
+
+==============================================================================
+
 Author: GitHub Actions Bot
 """
 
@@ -44,7 +74,7 @@ class FLOFileSyncManager:
         self.pr_number = pr_number
         
         # Determine which file to watch based on the base branch
-        # For example, if base_branch is 'uat_emea', watch 'flo_uat_emea'
+        # For example, if base_branch is 'uat_emea', watch 'flo_uat_emea.yml'
         self.flo_file = f"flo_{base_branch}.yml"
         
         # Calculate target branches (all UAT branches except the base branch)
@@ -171,39 +201,57 @@ class FLOFileSyncManager:
     
     def sync_to_target_branch(self, target_branch: str, file_content: str) -> Optional[str]:
         """
-        Sync the FLO file content to a target branch.
+        Sync the FLO file content to a target branch by creating a NEW branch.
         
-        This method:
-        1. Checks out the target branch
-        2. Creates a new sync branch
-        3. Writes the file content
-        4. Commits and pushes the changes
+        IMPORTANT: This method DOES NOT commit directly to the target branch.
+        Instead, it follows this flow:
+        
+        1. Checkout the target branch (e.g., uat_na) as a starting point
+        2. Create a NEW sync branch (e.g., sync-flo-from-uat_emea-to-uat_na-123456)
+        3. Write the file content to the NEW sync branch
+        4. Commit and push changes to the NEW sync branch (NOT to target branch)
+        5. Return the sync branch name so a PR can be created later
+        
+        The actual PR from sync_branch → target_branch is created in create_pull_request()
         
         Args:
-            target_branch: The target UAT branch to sync to
+            target_branch: The target UAT branch (will be the BASE of the PR)
             file_content: The content to write to the flo file
             
         Returns:
-            The name of the created sync branch, or None if no changes needed
+            The name of the created sync branch (will be the HEAD of the PR), 
+            or None if no changes needed
         """
         print(f"\n{'='*60}")
         print(f"🔄 Syncing to {target_branch}")
+        print(f"⚠️  NOTE: Creating a NEW branch, NOT committing directly!")
         print(f"{'='*60}")
         
         # Fetch the latest version of the target branch from remote
+        # We need this as a starting point to create our sync branch
         print(f"📥 Fetching {target_branch}...")
         self.run_command(["git", "fetch", "origin", target_branch])
         
-        # Checkout the target branch
-        print(f"🔀 Checking out {target_branch}...")
+        # Checkout the target branch TEMPORARILY (just to use as a base)
+        # We will immediately create a new branch from this point
+        print(f"🔀 Checking out {target_branch} (as a starting point)...")
         self.run_command(["git", "checkout", target_branch])
         
-        # Create a unique branch name for this sync operation
+        # ============================================================
+        # CRITICAL: Create a NEW branch for the PR
+        # ============================================================
+        # We are NOT committing to the target branch directly!
+        # Instead, we create a unique sync branch that will be used
+        # as the HEAD (source) branch of the pull request.
+        # 
         # Format: sync-flo-from-{source}-to-{target}-{timestamp}
+        # Example: sync-flo-from-uat_emea-to-uat_na-1707123456
+        # ============================================================
         timestamp = int(datetime.now().timestamp())
         sync_branch = f"sync-flo-from-{self.base_branch}-to-{target_branch}-{timestamp}"
         
-        print(f"🌿 Creating sync branch: {sync_branch}")
+        print(f"🌿 Creating NEW sync branch: {sync_branch}")
+        print(f"   This branch will be the HEAD of the PR → {target_branch}")
         self.run_command(["git", "checkout", "-b", sync_branch])
         
         # The target file name in this branch (same pattern: flo_{branch_name})
@@ -229,8 +277,10 @@ class FLOFileSyncManager:
             self.run_command(["git", "branch", "-D", sync_branch])
             return None
         
-        # Stage the changes
-        print(f"➕ Staging changes...")
+        # ============================================================
+        # Stage and commit changes to the SYNC BRANCH (not target branch!)
+        # ============================================================
+        print(f"➕ Staging changes in {sync_branch}...")
         self.run_command(["git", "add", target_flo_file])
         
         # Create a descriptive commit message
@@ -240,28 +290,45 @@ class FLOFileSyncManager:
         else:
             commit_message += f"Automatically synced changes from {self.base_branch}"
         
-        print(f"💾 Committing changes...")
+        print(f"💾 Committing changes to {sync_branch} (NOT to {target_branch})...")
         self.run_command(["git", "commit", "-m", commit_message])
         
-        # Push the sync branch to remote
-        print(f"🚀 Pushing {sync_branch} to remote...")
+        # ============================================================
+        # Push the SYNC BRANCH to remote (not target branch!)
+        # ============================================================
+        # This pushes our new sync branch to the remote repository.
+        # The target branch remains untouched at this point.
+        # A PR will be created in the next step (create_pull_request method)
+        # ============================================================
+        print(f"🚀 Pushing {sync_branch} to remote (target branch unchanged)...")
         self.run_command(["git", "push", "origin", sync_branch])
         
-        print(f"✅ Successfully synced to {target_branch}")
+        print(f"✅ Successfully created sync branch for {target_branch}")
+        print(f"   Next step: Create PR from {sync_branch} → {target_branch}")
         return sync_branch
     
     def create_pull_request(self, target_branch: str, sync_branch: str) -> Optional[str]:
         """
-        Create a pull request for the synced changes.
+        Create a pull request from sync_branch → target_branch.
+        
+        This is where the magic happens! The PR structure is:
+        - BASE branch: target_branch (e.g., uat_na) - where changes will be merged
+        - HEAD branch: sync_branch (e.g., sync-flo-from-uat_emea-to-uat_na-123456)
+        
+        The target branch is NEVER directly modified. All changes go through PR review.
         
         Args:
-            target_branch: The base branch for the PR (e.g., 'uat_na')
-            sync_branch: The head branch with the changes
+            target_branch: The BASE branch for the PR (where changes will merge to)
+            sync_branch: The HEAD branch with the changes (source of the PR)
             
         Returns:
             The URL of the created PR, or None if creation failed
         """
-        print(f"\n📝 Creating PR for {target_branch}...")
+        print(f"\n{'='*60}")
+        print(f"📝 Creating Pull Request")
+        print(f"   FROM: {sync_branch} (HEAD)")
+        print(f"   TO:   {target_branch} (BASE)")
+        print(f"{'='*60}")
         
         # Construct the PR title
         pr_title = f"🔄 Sync flo_{target_branch} from {self.base_branch}"
@@ -288,12 +355,26 @@ The content of `flo_{target_branch}` has been replicated from `{self.base_branch
 🤖 This PR was automatically generated by the FLO File Sync workflow.
 """
         
+        # ============================================================
+        # Create the Pull Request using GitHub CLI
+        # ============================================================
+        # This command creates a PR with:
+        #   --base target_branch  : Where the changes will be merged (e.g., uat_na)
+        #   --head sync_branch    : Source of changes (e.g., sync-flo-from-uat_emea-to-uat_na-123456)
+        #
+        # IMPORTANT: The target_branch is PROTECTED by the PR process.
+        # Changes cannot be merged until the PR is reviewed and approved.
+        # ============================================================
+        print(f"🔧 Executing: gh pr create")
+        print(f"   --base {target_branch}")
+        print(f"   --head {sync_branch}")
+        
         # Use GitHub CLI to create the pull request
         # The gh CLI tool is pre-installed on GitHub Actions runners
         returncode, pr_url, error = self.run_command([
             "gh", "pr", "create",
-            "--base", target_branch,
-            "--head", sync_branch,
+            "--base", target_branch,      # TARGET: Where changes will be merged
+            "--head", sync_branch,        # SOURCE: Branch with the changes
             "--title", pr_title,
             "--body", pr_body
         ], check=False)
@@ -371,11 +452,38 @@ Changes to `{self.flo_file}` have been automatically replicated to other UAT bra
         """
         Execute the complete sync workflow.
         
-        This is the main orchestration method that:
-        1. Detects file changes
-        2. Syncs to all target branches
-        3. Creates pull requests
-        4. Comments on the original PR
+        ============================================================
+        WORKFLOW OVERVIEW - NO DIRECT COMMITS TO TARGET BRANCHES!
+        ============================================================
+        
+        This workflow follows a SAFE, PR-based approach:
+        
+        1. DETECT: Check if flo_{branch_name} was changed in original PR
+        
+        2. READ: Get the content of the changed file
+        
+        3. SYNC: For each target branch (e.g., uat_na, uat_apac, uat_latam):
+           a. Create a NEW sync branch (e.g., sync-flo-from-uat_emea-to-uat_na-123456)
+           b. Commit changes to the NEW sync branch
+           c. Push the NEW sync branch to remote
+           d. Create PR: sync_branch → target_branch
+        
+        4. COMMENT: Add links to all created PRs on the original PR
+        
+        IMPORTANT: Target branches are NEVER modified directly!
+        All changes go through the PR review process.
+        
+        ============================================================
+        
+        Example Flow:
+        - Original PR: feature-branch → uat_emea (changes flo_uat_emea)
+        - This creates 3 PRs:
+          * sync-flo-from-uat_emea-to-uat_na-123 → uat_na
+          * sync-flo-from-uat_emea-to-uat_apac-456 → uat_apac
+          * sync-flo-from-uat_emea-to-uat_latam-789 → uat_latam
+        - Original PR gets comment with links to all 3 PRs
+        
+        ============================================================
         
         Args:
             commit_sha: The commit SHA to check for changes
@@ -405,20 +513,27 @@ Changes to `{self.flo_file}` have been automatically replicated to other UAT bra
         
         # Step 3: Sync to each target branch
         print(f"\n🔄 Syncing to {len(self.target_branches)} target branches...")
+        print(f"⚠️  Remember: We create PRs, NOT direct commits!")
+        print()
         
-        synced_branches = []  # Track which branches actually got changes
+        synced_branches = []  # Track which branches actually got PRs created
         
         for target_branch in self.target_branches:
+            # Create sync branch and commit changes to it (NOT to target branch!)
             sync_branch = self.sync_to_target_branch(target_branch, file_content)
             
             if sync_branch:
-                # Changes were made, now create a PR
+                # Changes were made to sync_branch, now create a PR to target_branch
+                print(f"\n📋 Changes ready in {sync_branch}")
+                print(f"   Now creating PR: {sync_branch} → {target_branch}")
+                
                 pr_url = self.create_pull_request(target_branch, sync_branch)
                 
                 if pr_url:
                     synced_branches.append(target_branch)
+                    print(f"✅ PR created successfully: {pr_url}")
             else:
-                print(f"⏭️  Skipping PR creation for {target_branch} (no changes needed)")
+                print(f"⏭️  Skipping {target_branch} - no changes needed (already in sync)")
         
         # Step 4: Add comment to original PR if any PRs were created
         if self.created_prs:
