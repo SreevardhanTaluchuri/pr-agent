@@ -45,7 +45,7 @@ class FLOFileSyncManager:
         
         # Determine which file to watch based on the base branch
         # For example, if base_branch is 'uat_emea', watch 'flo_uat_emea'
-        self.flo_file = f"flo_{base_branch}"
+        self.flo_file = f"flo_{base_branch}.yml"
         
         # Calculate target branches (all UAT branches except the base branch)
         self.target_branches = [b for b in self.ALL_UAT_BRANCHES if b != base_branch]
