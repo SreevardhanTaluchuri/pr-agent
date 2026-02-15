@@ -1,155 +1,494 @@
+#!/usr/bin/env python3
+"""
+FLO File Sync Script for UAT Branches
+
+This script detects changes to flo_{branch_name} files in pull requests
+and replicates those changes to other UAT branches automatically.
+
+Author: GitHub Actions Bot
+"""
+
 import os
-import re
+import sys
 import json
-import requests
-from openai import OpenAI
+import subprocess
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime
 
-# --- Config ---
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-REPO = os.environ["GITHUB_REPO"]
-PR_NUMBER = os.environ["PR_NUMBER"]
-OPENAI_API_KEY = os.environ["HF_TOKEN"]
 
-GITHUB_API = f"https://api.github.com/repos/{REPO}"
-HF_API_URL = "https://api-inference.huggingface.co/models/codellama/CodeLlama-7b-Instruct-hf"
-
-# --- Helpers ---
-def get_pr_files():
-    url = f"{GITHUB_API}/pulls/{PR_NUMBER}/files"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    return response.json()
-
-def parse_patch_to_line_map(patch):
+class FLOFileSyncManager:
     """
-    Uses Hugging Face Inference API (CodeLlama).
-    Returns list of {"diff_line", "severity", "comment"}
+    Manages the synchronization of FLO files across UAT branches.
+    
+    This class handles:
+    - Detection of changes to flo_{branch_name} files
+    - Replication of changes to target branches
+    - Creation of pull requests
+    - Adding comments to the original PR
     """
-    line_map = {}
-    if not patch:
-        return line_map
-
-    file_line = None
-    diff_line = 0
-
-    for line in patch.splitlines():
-        diff_line += 1
-        if line.startswith("@@"):
-            # Example: @@ -21,7 +21,9 @@
-            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
-            if m:
-                file_line = int(m.group(1)) - 1
-        elif line.startswith("+"):
-            file_line += 1
-            line_map[diff_line] = file_line
-        elif line.startswith("-"):
-            continue
+    
+    # Define all UAT branches that should be kept in sync
+    ALL_UAT_BRANCHES = ["uat_na", "uat_emea", "uat_apac", "uat_latam"]
+    
+    def __init__(self, base_branch: str, current_branch: str, pr_number: Optional[str] = None):
+        """
+        Initialize the FLO File Sync Manager.
+        
+        Args:
+            base_branch: The base branch of the PR (e.g., 'uat_emea')
+            current_branch: The head/source branch of the PR
+            pr_number: The pull request number (if triggered by PR event)
+        """
+        self.base_branch = base_branch
+        self.current_branch = current_branch
+        self.pr_number = pr_number
+        
+        # Determine which file to watch based on the base branch
+        # For example, if base_branch is 'uat_emea', watch 'flo_uat_emea'
+        self.flo_file = f"flo_{base_branch}"
+        
+        # Calculate target branches (all UAT branches except the base branch)
+        self.target_branches = [b for b in self.ALL_UAT_BRANCHES if b != base_branch]
+        
+        # Storage for created PR information
+        self.created_prs: List[Dict[str, str]] = []
+        
+        print(f"🔧 Initialized FLO File Sync Manager")
+        print(f"   Base Branch: {self.base_branch}")
+        print(f"   Current Branch: {self.current_branch}")
+        print(f"   Watching File: {self.flo_file}")
+        print(f"   Target Branches: {', '.join(self.target_branches)}")
+    
+    def run_command(self, command: List[str], check: bool = True) -> Tuple[int, str, str]:
+        """
+        Execute a shell command and return the result.
+        
+        Args:
+            command: List of command arguments
+            check: Whether to raise exception on non-zero exit code
+            
+        Returns:
+            Tuple of (return_code, stdout, stderr)
+        """
+        print(f"💻 Running: {' '.join(command)}")
+        
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=check
+            )
+            return result.returncode, result.stdout.strip(), result.stderr.strip()
+        except subprocess.CalledProcessError as e:
+            print(f"❌ Command failed with exit code {e.returncode}")
+            print(f"   Error: {e.stderr}")
+            if check:
+                raise
+            return e.returncode, e.stdout, e.stderr
+    
+    def detect_file_changes(self, commit_sha: str) -> bool:
+        """
+        Detect if the flo_{branch_name} file was changed in the current PR/commit.
+        
+        Args:
+            commit_sha: The commit SHA to compare against
+            
+        Returns:
+            True if the flo file was changed, False otherwise
+        """
+        print(f"\n🔍 Detecting changes to {self.flo_file}...")
+        
+        # Get the list of changed files by comparing with the base branch
+        # This shows all files that differ between the base branch and the current commit
+        returncode, changed_files, _ = self.run_command([
+            "git", "diff", "--name-only",
+            f"origin/{self.base_branch}...{commit_sha}"
+        ])
+        
+        if returncode != 0:
+            print(f"⚠️  Failed to get changed files")
+            return False
+        
+        # Split the output into individual file paths
+        files_list = changed_files.split('\n') if changed_files else []
+        
+        print(f"📝 Changed files in this PR:")
+        for file in files_list:
+            print(f"   - {file}")
+        
+        # Check if our target flo file is in the list of changed files
+        file_changed = self.flo_file in files_list
+        
+        if file_changed:
+            print(f"✅ FLO file '{self.flo_file}' was modified")
         else:
-            file_line += 1
-    return line_map
-
-def analyze_code_with_ai(filename, patch):
-    """
-    Ask AI to generate review comments with severity.
-    Must return JSON list: 
-    [
-      {"diff_line": <diff_line>, "severity": "Critical|Warning|Suggestion", "comment": "<text>"}
-    ]
-    """
-
-    prompt = f"""
-    You are a PYTHON code reviewer.
-     Review the following Pull Request diff for `{filename}`
-    - Point out syntax errors if any
-    - Suggest cleaner or more efficient alternatives
-    - Give feedback in concise bullet points
-
-    For each finding:
-    - Use `severity` field with one of: Critical, Warning, Suggestion
-    - Critical = bugs, security, crashes
-    - Warning = performance, readability, maintainability issues
-    - Suggestion = stylistic improvements, best practices
-
-    Return STRICT JSON array only, like:
-    [
-      {{"line": 42, "severity": "Critical", "comment": "Null reference risk here."}},
-      {{"line": 42, "severity": "Suggestion", "comment": "Consider using 'using' statement for disposal."}}
-    ]
-
-    Diff:
-    {patch}
-    """
-    client = OpenAI(
-        base_url="https://router.huggingface.co/v1",
-        api_key=os.environ["HF_TOKEN"],
-    )
+            print(f"ℹ️  FLO file '{self.flo_file}' was not modified")
+        
+        return file_changed
     
-    resp = client.chat.completions.create(
-        model="openai/gpt-oss-120b:together",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=600,
-        temperature=0,
-    )
+    def get_file_content(self, file_path: str) -> Optional[str]:
+        """
+        Read and return the content of a file.
+        
+        Args:
+            file_path: Path to the file to read
+            
+        Returns:
+            File content as string, or None if file doesn't exist
+        """
+        try:
+            with open(file_path, 'r') as f:
+                content = f.read()
+            print(f"✅ Successfully read {file_path} ({len(content)} bytes)")
+            return content
+        except FileNotFoundError:
+            print(f"❌ File not found: {file_path}")
+            return None
+        except Exception as e:
+            print(f"❌ Error reading file {file_path}: {e}")
+            return None
     
-    text = resp.choices[0].message.content.strip()
+    def write_file_content(self, file_path: str, content: str) -> bool:
+        """
+        Write content to a file.
+        
+        Args:
+            file_path: Path to the file to write
+            content: Content to write to the file
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with open(file_path, 'w') as f:
+                f.write(content)
+            print(f"✅ Successfully wrote to {file_path} ({len(content)} bytes)")
+            return True
+        except Exception as e:
+            print(f"❌ Error writing file {file_path}: {e}")
+            return False
     
-    try:
-        return json.loads(text)
-    except Exception:
-        return []
+    def sync_to_target_branch(self, target_branch: str, file_content: str) -> Optional[str]:
+        """
+        Sync the FLO file content to a target branch.
+        
+        This method:
+        1. Checks out the target branch
+        2. Creates a new sync branch
+        3. Writes the file content
+        4. Commits and pushes the changes
+        
+        Args:
+            target_branch: The target UAT branch to sync to
+            file_content: The content to write to the flo file
+            
+        Returns:
+            The name of the created sync branch, or None if no changes needed
+        """
+        print(f"\n{'='*60}")
+        print(f"🔄 Syncing to {target_branch}")
+        print(f"{'='*60}")
+        
+        # Fetch the latest version of the target branch from remote
+        print(f"📥 Fetching {target_branch}...")
+        self.run_command(["git", "fetch", "origin", target_branch])
+        
+        # Checkout the target branch
+        print(f"🔀 Checking out {target_branch}...")
+        self.run_command(["git", "checkout", target_branch])
+        
+        # Create a unique branch name for this sync operation
+        # Format: sync-flo-from-{source}-to-{target}-{timestamp}
+        timestamp = int(datetime.now().timestamp())
+        sync_branch = f"sync-flo-from-{self.base_branch}-to-{target_branch}-{timestamp}"
+        
+        print(f"🌿 Creating sync branch: {sync_branch}")
+        self.run_command(["git", "checkout", "-b", sync_branch])
+        
+        # The target file name in this branch (same pattern: flo_{branch_name})
+        target_flo_file = f"flo_{target_branch}"
+        
+        # Write the content to the target flo file
+        print(f"📝 Writing content to {target_flo_file}...")
+        if not self.write_file_content(target_flo_file, file_content):
+            print(f"❌ Failed to write file content")
+            return None
+        
+        # Check if there are actual differences (git diff will be empty if no changes)
+        returncode, diff_output, _ = self.run_command(
+            ["git", "diff", "--quiet"],
+            check=False
+        )
+        
+        # git diff --quiet returns 0 if no differences, 1 if differences exist
+        if returncode == 0:
+            print(f"ℹ️  No changes needed for {target_branch} (content is already identical)")
+            # Clean up: go back to original branch and delete the sync branch
+            self.run_command(["git", "checkout", target_branch])
+            self.run_command(["git", "branch", "-D", sync_branch])
+            return None
+        
+        # Stage the changes
+        print(f"➕ Staging changes...")
+        self.run_command(["git", "add", target_flo_file])
+        
+        # Create a descriptive commit message
+        commit_message = f"Sync {target_flo_file} from {self.base_branch}\n\n"
+        if self.pr_number:
+            commit_message += f"Automatically synced changes from PR #{self.pr_number} in {self.base_branch}"
+        else:
+            commit_message += f"Automatically synced changes from {self.base_branch}"
+        
+        print(f"💾 Committing changes...")
+        self.run_command(["git", "commit", "-m", commit_message])
+        
+        # Push the sync branch to remote
+        print(f"🚀 Pushing {sync_branch} to remote...")
+        self.run_command(["git", "push", "origin", sync_branch])
+        
+        print(f"✅ Successfully synced to {target_branch}")
+        return sync_branch
+    
+    def create_pull_request(self, target_branch: str, sync_branch: str) -> Optional[str]:
+        """
+        Create a pull request for the synced changes.
+        
+        Args:
+            target_branch: The base branch for the PR (e.g., 'uat_na')
+            sync_branch: The head branch with the changes
+            
+        Returns:
+            The URL of the created PR, or None if creation failed
+        """
+        print(f"\n📝 Creating PR for {target_branch}...")
+        
+        # Construct the PR title
+        pr_title = f"🔄 Sync flo_{target_branch} from {self.base_branch}"
+        
+        # Construct a detailed PR body with markdown formatting
+        pr_body = f"""## Automated FLO File Sync
 
-def decorate_comment(severity, comment):
-    if severity.lower() == "critical":
-        return f"⚠️ **Critical**: {comment}"
-    elif severity.lower() == "warning":
-        return f"⚡ **Warning**: {comment}"
-    else:
-        return f"💡 **Suggestion**: {comment}"
+This PR automatically syncs changes made to `flo_{target_branch}` from the `{self.base_branch}` branch.
 
-def post_review(comments):
-    url = f"{GITHUB_API}/pulls/{PR_NUMBER}/reviews"
-    headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-    data = {
-        "body": "🤖 Automated AI code review suggestions",
-        "event": "COMMENT",
-        "comments": comments,
-    }
-    response = requests.post(url, headers=headers, json=data)
-    response.raise_for_status()
+### Source Information
+- **Source Branch:** {self.base_branch}
+- **Original PR:** #{self.pr_number if self.pr_number else 'N/A'}
+- **File:** `flo_{target_branch}`
+
+### What Changed
+The content of `flo_{target_branch}` has been replicated from `{self.base_branch}` to maintain consistency across UAT environments.
+
+### Review Checklist
+- [ ] Verify the file content matches the source
+- [ ] Check for any environment-specific configurations
+- [ ] Ensure no sensitive data is included
+
+---
+🤖 This PR was automatically generated by the FLO File Sync workflow.
+"""
+        
+        # Use GitHub CLI to create the pull request
+        # The gh CLI tool is pre-installed on GitHub Actions runners
+        returncode, pr_url, error = self.run_command([
+            "gh", "pr", "create",
+            "--base", target_branch,
+            "--head", sync_branch,
+            "--title", pr_title,
+            "--body", pr_body
+        ], check=False)
+        
+        if returncode != 0:
+            print(f"❌ Failed to create PR: {error}")
+            return None
+        
+        print(f"✅ Created PR: {pr_url}")
+        
+        # Store the PR information for later use
+        self.created_prs.append({
+            "target_branch": target_branch,
+            "sync_branch": sync_branch,
+            "pr_url": pr_url
+        })
+        
+        return pr_url
+    
+    def add_comment_to_original_pr(self) -> bool:
+        """
+        Add a comment to the original PR with links to all created PRs.
+        
+        Returns:
+            True if comment was added successfully, False otherwise
+        """
+        if not self.pr_number:
+            print("ℹ️  No PR number available, skipping comment")
+            return False
+        
+        if not self.created_prs:
+            print("ℹ️  No PRs were created, skipping comment")
+            return False
+        
+        print(f"\n💬 Adding comment to original PR #{self.pr_number}...")
+        
+        # Build a list of PR links in markdown format
+        pr_links = []
+        for pr_info in self.created_prs:
+            pr_links.append(f"- [{pr_info['target_branch']}]({pr_info['pr_url']})")
+        
+        pr_links_text = '\n'.join(pr_links)
+        
+        # Construct the comment body
+        comment_body = f"""## 🔄 FLO File Changes Replicated
+
+Changes to `{self.flo_file}` have been automatically replicated to other UAT branches.
+
+### Created Pull Requests:
+{pr_links_text}
+
+**Next Steps:**
+1. Review each PR to ensure the changes are correct
+2. Merge the PRs to synchronize all UAT environments
+3. Monitor for any deployment or testing issues
+
+---
+🤖 Automated by FLO File Sync workflow | [View workflow run](https://github.com/${{{{GITHUB_REPOSITORY}}}}/actions/runs/${{{{GITHUB_RUN_ID}}}})
+"""
+        
+        # Use GitHub CLI to add the comment
+        returncode, _, error = self.run_command([
+            "gh", "pr", "comment", self.pr_number,
+            "--body", comment_body
+        ], check=False)
+        
+        if returncode != 0:
+            print(f"❌ Failed to add comment: {error}")
+            return False
+        
+        print(f"✅ Comment added to PR #{self.pr_number}")
+        return True
+    
+    def run_sync_workflow(self, commit_sha: str) -> int:
+        """
+        Execute the complete sync workflow.
+        
+        This is the main orchestration method that:
+        1. Detects file changes
+        2. Syncs to all target branches
+        3. Creates pull requests
+        4. Comments on the original PR
+        
+        Args:
+            commit_sha: The commit SHA to check for changes
+            
+        Returns:
+            Exit code (0 for success, 1 for failure)
+        """
+        print("\n" + "="*60)
+        print("🚀 Starting FLO File Sync Workflow")
+        print("="*60)
+        
+        # Step 1: Detect if the flo file was changed
+        if not self.detect_file_changes(commit_sha):
+            print("\n✅ No changes to FLO file detected. Exiting gracefully.")
+            return 0
+        
+        # Step 2: Read the content of the changed flo file
+        print(f"\n📖 Reading content from {self.flo_file}...")
+        
+        # First, make sure we're on the right commit
+        self.run_command(["git", "checkout", commit_sha])
+        
+        file_content = self.get_file_content(self.flo_file)
+        if file_content is None:
+            print(f"❌ Failed to read {self.flo_file}")
+            return 1
+        
+        # Step 3: Sync to each target branch
+        print(f"\n🔄 Syncing to {len(self.target_branches)} target branches...")
+        
+        synced_branches = []  # Track which branches actually got changes
+        
+        for target_branch in self.target_branches:
+            sync_branch = self.sync_to_target_branch(target_branch, file_content)
+            
+            if sync_branch:
+                # Changes were made, now create a PR
+                pr_url = self.create_pull_request(target_branch, sync_branch)
+                
+                if pr_url:
+                    synced_branches.append(target_branch)
+            else:
+                print(f"⏭️  Skipping PR creation for {target_branch} (no changes needed)")
+        
+        # Step 4: Add comment to original PR if any PRs were created
+        if self.created_prs:
+            print(f"\n📊 Summary: Created {len(self.created_prs)} pull request(s)")
+            self.add_comment_to_original_pr()
+        else:
+            print("\nℹ️  No pull requests were created (all branches already in sync)")
+        
+        print("\n" + "="*60)
+        print("✅ FLO File Sync Workflow Completed Successfully")
+        print("="*60)
+        
+        return 0
+
 
 def main():
-    files = get_pr_files()
-    review_comments = []
+    """
+    Main entry point for the script.
+    
+    Reads environment variables set by GitHub Actions and executes the sync workflow.
+    
+    Expected Environment Variables:
+        - BASE_BRANCH: The base branch of the PR (e.g., 'uat_emea')
+        - CURRENT_BRANCH: The head/source branch of the PR
+        - COMMIT_SHA: The commit SHA to check for changes
+        - PR_NUMBER: The pull request number (optional)
+    """
+    print("="*60)
+    print("FLO File Sync Script - Starting")
+    print("="*60)
+    
+    # Read environment variables set by the GitHub Actions workflow
+    base_branch = os.getenv("BASE_BRANCH")
+    current_branch = os.getenv("CURRENT_BRANCH")
+    commit_sha = os.getenv("COMMIT_SHA")
+    pr_number = os.getenv("PR_NUMBER")
+    
+    # Validate that all required environment variables are present
+    if not base_branch:
+        print("❌ Error: BASE_BRANCH environment variable not set")
+        sys.exit(1)
+    
+    if not current_branch:
+        print("❌ Error: CURRENT_BRANCH environment variable not set")
+        sys.exit(1)
+    
+    if not commit_sha:
+        print("❌ Error: COMMIT_SHA environment variable not set")
+        sys.exit(1)
+    
+    print(f"\n📋 Configuration:")
+    print(f"   Base Branch: {base_branch}")
+    print(f"   Current Branch: {current_branch}")
+    print(f"   Commit SHA: {commit_sha}")
+    print(f"   PR Number: {pr_number or 'N/A'}")
+    print()
+    
+    # Initialize the sync manager with the provided configuration
+    sync_manager = FLOFileSyncManager(
+        base_branch=base_branch,
+        current_branch=current_branch,
+        pr_number=pr_number
+    )
+    
+    # Execute the sync workflow
+    exit_code = sync_manager.run_sync_workflow(commit_sha)
+    
+    # Exit with the appropriate code
+    sys.exit(exit_code)
 
-    for file in files:
-        if not file["filename"].endswith(".yml"):
-            continue
-        patch = file.get("patch")
-        if not patch:
-            continue
-
-        suggestions = analyze_code_with_ai(file["filename"], patch)
-
-        for s in suggestions:
-            # GitHub expects "side": "RIGHT" for new code
-            print(s)
-            review_comments.append({
-                "path": file["filename"],
-                "position": s.get("line"),  # must be a valid diff position
-                "body": decorate_comment(s.get("severity", "Suggestion"), s.get("comment")),
-            })
-            print(review_comments)
-
-    if review_comments:
-        post_review(review_comments)
-    else:
-        # Post a simple PR comment instead of an inline review
-        url = f"{GITHUB_API}/issues/{PR_NUMBER}/comments"
-        headers = {"Authorization": f"token {GITHUB_TOKEN}"}
-        data = {"body": "✅ No Python code issues found in this PR."}
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
 
 if __name__ == "__main__":
     main()
