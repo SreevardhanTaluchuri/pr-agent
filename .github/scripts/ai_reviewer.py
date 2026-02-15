@@ -123,7 +123,7 @@ def main():
     review_comments = []
 
     for file in files:
-        if not file["filename"].endswith(".py"):
+        if not file["filename"].endswith(".yml"):
             continue
         patch = file.get("patch")
         if not patch:
